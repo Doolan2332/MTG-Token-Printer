@@ -25,6 +25,7 @@ button:disabled{opacity:.5}
 #prev{display:block;margin:10px auto;background:#fff;border:1px solid var(--bd);max-width:100%;width:384px}
 label{font-size:14px;color:var(--mut);display:flex;align-items:center;gap:6px}
 #copies{width:64px;flex:none}
+.quick button{flex:1;padding:9px 4px;font-size:14px}
 </style>
 </head>
 <body>
@@ -33,7 +34,14 @@ label{font-size:14px;color:var(--mut);display:flex;align-items:center;gap:6px}
   <input id="q" placeholder="3/3 green beast" autocapitalize="none" autocomplete="off">
   <button class="p" id="go">Find</button>
 </div>
-<div id="st">Type a token, e.g. "1/1 white soldier", "2/2 black zombie", "treasure".</div>
+<div class="row quick">
+  <button data-q="treasure">Treasure</button>
+  <button data-q="food">Food</button>
+  <button data-q="clue">Clue</button>
+  <button data-q="blood">Blood</button>
+</div>
+<div class="row"><input id="rt" placeholder="Rules text for placeholder (optional)" autocomplete="off"></div>
+<div id="st">Type a token, e.g. "1/1 white soldier", or an emblem, e.g. "elspeth emblem" or just "emblem".</div>
 <div id="grid"></div>
 <canvas id="prev" width="384" height="10"></canvas>
 <div class="row">
@@ -45,6 +53,14 @@ label{font-size:14px;color:var(--mut);display:flex;align-items:center;gap:6px}
 <script>
 const W = 384, BPL = 48;
 const COLORS = {white:'w',blue:'u',black:'b',red:'r',green:'g',colorless:'c'};
+const EMB_SKIP = new Set(['of','the','a','an']);
+const ARTIFACTS = new Set(['treasure','food','clue','blood','gold','powerstone','map','junk','shard','incubator']);
+const ART_TEXT = {
+  treasure: '{T}, Sacrifice this artifact: Add one mana of any color.',
+  food: '{2}, {T}, Sacrifice this artifact: You gain 3 life.',
+  clue: '{2}, Sacrifice this artifact: Draw a card.',
+  blood: '{1}, {T}, Discard a card, Sacrifice this artifact: Draw a card.'
+};
 const SKIP = new Set(['token','creature','artifact','a','an','the','and','multicolor','gold']);
 const $ = id => document.getElementById(id);
 const st = $('st');
@@ -56,24 +72,28 @@ let parsed = null, cands = [], sel = 0, canvasReady = null, dev = null, chr = nu
 /* ---------- parsing ---------- */
 function parse(text) {
   let t = text.toLowerCase();
+  const emblem = /\bemblems?\b/.test(t);
+  t = t.replace(/\bemblems?\b/g, ' ');
   const m = t.match(/(\d+|\*)\s*\/\s*(\d+|\*)/);
   let p = null, tt = null;
   if (m) { p = m[1]; tt = m[2]; t = t.replace(m[0], ' '); }
   const colors = [], type = [];
   for (let w of (t.match(/[a-z'-]+/g) || [])) {
+    w = w.replace(/'s$/, '');
+    if (emblem) { if (!EMB_SKIP.has(w)) type.push(w); continue; }
     if (COLORS[w]) { colors.push(COLORS[w]); continue; }
     if (SKIP.has(w)) continue;
     if (w === 'elves') w = 'elf'; else if (w === 'wolves') w = 'wolf';
     else if (w.length > 3 && w.endsWith('s') && !w.endsWith('ss')) w = w.slice(0, -1);
     type.push(w);
   }
-  return { p, t: tt, colors, type };
+  return { p, t: tt, colors, type, emblem };
 }
 
 /* ---------- scryfall ---------- */
-async function sf(q) {
+async function sf(q, order) {
   await sleep(110);
-  const r = await fetch('https://api.scryfall.com/cards/search?unique=art&q=' + encodeURIComponent(q));
+  const r = await fetch('https://api.scryfall.com/cards/search?unique=art' + (order ? '&order=' + order + '&dir=desc' : '') + '&q=' + encodeURIComponent(q));
   if (!r.ok) return [];
   return (await r.json()).data || [];
 }
@@ -81,6 +101,18 @@ function artOf(c) {
   return (c.image_uris || (c.card_faces && c.card_faces[0].image_uris) || {}).art_crop || null;
 }
 async function search(x) {
+  if (x.emblem) {
+    const nm = x.type.map(w => 'name:' + w);
+    const tries = nm.length
+      ? [['Emblem match', 't:emblem ' + nm.join(' ')], ['Partial emblem match', nm.length > 1 ? 't:emblem (' + nm.join(' or ') + ')' : null]]
+      : [['Newest emblems', 't:emblem', 'released']];
+    for (const [label, q, order] of tries) {
+      if (!q) continue;
+      const res = await sf(q, order);
+      if (res.length) return { label, cards: res.slice(0, 40) };
+    }
+    return { label: 'No emblem match', cards: [] };
+  }
   const ty = x.type.map(w => 't:' + w).join(' ');
   const pt = (x.p && x.p !== '*' ? ' pow=' + x.p : '') + (x.t && x.t !== '*' ? ' tou=' + x.t : '');
   const col = x.colors.length ? ' c=' + x.colors.join('') : '';
@@ -135,13 +167,22 @@ async function render(card) {
   c.fillStyle = '#000'; c.textBaseline = 'alphabetic'; c.textAlign = 'center';
 
   const typeWords = parsed.type.length ? title(parsed.type.join(' ')) : 'Token';
-  const name = card ? card.name : typeWords;
+  const name = card ? card.name : (parsed.emblem ? (parsed.type.length ? typeWords + ' Emblem' : 'Emblem') : typeWords);
   const pw = parsed.p !== null ? parsed.p : (card && card.power);
   const to = parsed.t !== null ? parsed.t : (card && card.toughness);
   const hasPT = pw != null && to != null;
-  const typeLine = card ? card.type_line : 'Token Creature \u2014 ' + typeWords;
+  const lastW = parsed.type[parsed.type.length - 1] || '';
+  const typeLine = card ? card.type_line
+    : parsed.emblem ? 'Emblem'
+    : (!hasPT && ARTIFACTS.has(lastW)) ? 'Token Artifact \u2014 ' + typeWords
+    : 'Token Creature \u2014 ' + typeWords;
   let oracle = card ? (card.oracle_text || (card.card_faces && card.card_faces[0].oracle_text) || '') : '';
-  if (!card && parsed.colors.length) oracle = parsed.colors.map(k => COLNAME[k]).join(' and ') + ' token';
+  if (!card) {
+    const custom = $('rt').value.trim();
+    if (custom) oracle = custom;
+    else if (!parsed.emblem && ART_TEXT[lastW] && !hasPT) oracle = ART_TEXT[lastW];
+    else if (parsed.colors.length) oracle = parsed.colors.map(k => COLNAME[k]).join(' and ') + ' token';
+  }
 
   let y = 12;
   let fs = fit(c, name, 'bold', card ? 30 : 56, W - 28);
@@ -216,7 +257,8 @@ async function show(i) {
 $('go').onclick = async () => {
   const text = $('q').value.trim(); if (!text) return;
   parsed = parse(text);
-  const d = `${parsed.p ?? '?'}/${parsed.t ?? '?'} ${parsed.colors.map(k => COLNAME[k]).join('/') || 'any color'} ${parsed.type.join(' ') || '(no type)'}`;
+  const d = parsed.emblem ? 'emblem ' + parsed.type.join(' ')
+    : `${parsed.p ?? '?'}/${parsed.t ?? '?'} ${parsed.colors.map(k => COLNAME[k]).join('/') || 'any color'} ${parsed.type.join(' ') || '(no type)'}`;
   log('Searching Scryfall for ' + d + '\u2026');
   $('go').disabled = true;
   try {
@@ -231,6 +273,8 @@ $('go').onclick = async () => {
   cands.forEach((c, i) => mk(`<img src="${artOf(c) || ''}" alt=""> ${c.set.toUpperCase()}`, i + 1));
   show(cands.length ? 1 : 0);
 };
+document.querySelectorAll('.quick button').forEach(b => b.onclick = () => { $('q').value = b.dataset.q; $('go').click(); });
+$('rt').addEventListener('change', () => { if (parsed && sel === 0) show(0); });
 $('q').addEventListener('keydown', e => { if (e.key === 'Enter') $('go').click(); });
 
 /* ---------- bluetooth ---------- */
