@@ -7,6 +7,7 @@
 <style>
 :root{--bg:#fff;--fg:#1a1a1a;--mut:#666;--card:#f2f2f2;--acc:#2f6fed;--bd:#ccc}
 @media (prefers-color-scheme:dark){:root{--bg:#121212;--fg:#eee;--mut:#999;--card:#1e1e1e;--acc:#6b9bff;--bd:#444}}
+@font-face{font-family:'Beleren';font-weight:100 900;src:local('Beleren Bold'),local('Beleren-Bold'),url('Beleren-Bold.woff2') format('woff2'),url('Beleren-Bold.ttf') format('truetype')}
 *{box-sizing:border-box}
 body{margin:0;padding:14px;font:16px system-ui,sans-serif;background:var(--bg);color:var(--fg);max-width:520px;margin-inline:auto}
 h1{font-size:20px;margin:0 0 12px}
@@ -41,6 +42,7 @@ label{font-size:14px;color:var(--mut);display:flex;align-items:center;gap:6px}
   <button data-q="blood">Blood</button>
 </div>
 <div class="row"><input id="rt" placeholder="Rules text for placeholder (optional)" autocomplete="off"></div>
+<div class="row"><button id="fbtn" style="flex:1">Load Beleren font file</button><input type="file" id="ffile" accept=".ttf,.otf,.woff,.woff2" hidden></div>
 <div id="st">Type a token, e.g. "1/1 white soldier", or an emblem, e.g. "elspeth emblem" or just "emblem".</div>
 <div id="grid"></div>
 <input type="file" id="file" accept="image/*" hidden>
@@ -143,7 +145,7 @@ function loadImg(url) {
   });
 }
 function fit(ctx, text, weight, size, maxW) {
-  while (size > 12) { ctx.font = `${weight} ${size}px sans-serif`; if (ctx.measureText(text).width <= maxW) break; size -= 2; }
+  while (size > 12) { ctx.font = `${weight} ${size}px Beleren, sans-serif`; if (ctx.measureText(text).width <= maxW) break; size -= 2; }
   return size;
 }
 function wrap(ctx, text, maxW) {
@@ -162,6 +164,7 @@ const title = s => s.replace(/\b\w/g, c => c.toUpperCase());
 const COLNAME = {w:'White',u:'Blue',b:'Black',r:'Red',g:'Green',c:'Colorless'};
 
 async function render(card) {
+  try { await document.fonts.load('bold 30px Beleren'); } catch (e) {}
   const big = document.createElement('canvas'); big.width = W; big.height = 900;
   const c = big.getContext('2d');
   c.fillStyle = '#fff'; c.fillRect(0, 0, W, 900);
@@ -187,7 +190,7 @@ async function render(card) {
 
   let y = 12;
   let fs = fit(c, name, 'bold', card ? 30 : 56, W - 28);
-  c.font = `bold ${fs}px sans-serif`; y += fs;
+  c.font = `bold ${fs}px Beleren, sans-serif`; y += fs;
   c.fillText(name, W / 2, y - 4); y += 10;
 
   const img = card ? await loadImg(artOf(card)) : upImg;
@@ -201,7 +204,7 @@ async function render(card) {
     y += h + 10;
   }
   fs = fit(c, typeLine, 'bold', 22, W - 28);
-  c.font = `bold ${fs}px sans-serif`; y += fs;
+  c.font = `bold ${fs}px Beleren, sans-serif`; y += fs;
   c.fillText(typeLine, W / 2, y - 3); y += 10;
   c.fillRect(14, y, W - 28, 2); y += 10;
 
@@ -213,7 +216,7 @@ async function render(card) {
   if (hasPT) {
     const bw = 104, bh = 50;
     c.lineWidth = 4; c.strokeRect(W - 14 - bw, y + 4, bw, bh);
-    c.textAlign = 'center'; c.font = 'bold 32px sans-serif';
+    c.textAlign = 'center'; c.font = 'bold 32px Beleren, sans-serif';
     c.fillText(`${pw}/${to}`, W - 14 - bw / 2, y + 4 + 37);
     y += bh + 10;
   }
@@ -293,6 +296,25 @@ $('file').onchange = e => {
   };
   i.onerror = () => log('Could not read that image.');
   i.src = upUrl;
+};
+const b64 = buf => { let s = '', a = new Uint8Array(buf); for (let i = 0; i < a.length; i += 8192) s += String.fromCharCode.apply(null, a.subarray(i, i + 8192)); return btoa(s); };
+const unb64 = t => Uint8Array.from(atob(t), c => c.charCodeAt(0)).buffer;
+async function useFont(buf) {
+  const f = new FontFace('Beleren', buf, { weight: '100 900' });
+  await f.load(); document.fonts.add(f);
+}
+try { const saved = localStorage.getItem('belerenFont'); if (saved) useFont(unb64(saved)).catch(() => {}); } catch (e) {}
+$('fbtn').onclick = () => $('ffile').click();
+$('ffile').onchange = async e => {
+  const f = e.target.files[0]; e.target.value = '';
+  if (!f) return;
+  try {
+    const buf = await f.arrayBuffer();
+    await useFont(buf);
+    try { localStorage.setItem('belerenFont', b64(buf)); } catch (e2) {}
+    log('Font loaded: ' + f.name);
+    if (canvasReady) show(sel);
+  } catch (err) { log('Could not load that font file.'); }
 };
 $('rt').addEventListener('change', () => { if (parsed && sel === 0) show(0); });
 $('q').addEventListener('keydown', e => { if (e.key === 'Enter') $('go').click(); });
