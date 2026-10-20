@@ -43,6 +43,7 @@ label{font-size:14px;color:var(--mut);display:flex;align-items:center;gap:6px}
 <div class="row"><input id="rt" placeholder="Rules text for placeholder (optional)" autocomplete="off"></div>
 <div id="st">Type a token, e.g. "1/1 white soldier", or an emblem, e.g. "elspeth emblem" or just "emblem".</div>
 <div id="grid"></div>
+<input type="file" id="file" accept="image/*" hidden>
 <canvas id="prev" width="384" height="10"></canvas>
 <div class="row">
   <button id="conn" style="flex:1">Connect printer</button>
@@ -67,7 +68,7 @@ const st = $('st');
 const log = m => { st.textContent = m; };
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-let parsed = null, cands = [], sel = 0, canvasReady = null, dev = null, chr = null;
+let upImg = null, upUrl = null, parsed = null, cands = [], sel = 0, canvasReady = null, dev = null, chr = null;
 
 /* ---------- parsing ---------- */
 function parse(text) {
@@ -189,11 +190,12 @@ async function render(card) {
   c.font = `bold ${fs}px sans-serif`; y += fs;
   c.fillText(name, W / 2, y - 4); y += 10;
 
-  const img = card ? await loadImg(artOf(card)) : null;
+  const img = card ? await loadImg(artOf(card)) : upImg;
   if (img) {
-    const h = Math.round((W - 28) * img.height / img.width);
+    const aw = W - 28, h = Math.min(300, Math.round(aw * img.height / img.width));
+    const sh = Math.min(img.height, img.width * h / aw), sy = (img.height - sh) / 2;
     c.filter = 'grayscale(1) contrast(1.25)';
-    c.drawImage(img, 14, y, W - 28, h);
+    c.drawImage(img, 0, sy, img.width, sh, 14, y, aw, h);
     c.filter = 'none';
     c.lineWidth = 3; c.strokeRect(14, y, W - 28, h);
     y += h + 10;
@@ -267,13 +269,31 @@ $('go').onclick = async () => {
     log(`${r.label}: ${cands.length} art option${cands.length === 1 ? '' : 's'} (${d}). Tap one to preview.`);
   } catch (e) { cands = []; log('Scryfall error: ' + e.message + '. Using placeholder.'); }
   $('go').disabled = false;
+  upImg = null;
   const g = $('grid'); g.innerHTML = '';
   const mk = (inner, i) => { const e = document.createElement('div'); e.className = 't'; e.innerHTML = inner; e.onclick = () => show(i); g.appendChild(e); };
-  mk('<div class="ph">\u270E</div>Placeholder', 0);
+  mk('<div class="ph">\u2B06</div>Placeholder / upload', 0);
+  g.firstChild.onclick = () => { $('file').click(); show(0); };
   cands.forEach((c, i) => mk(`<img src="${artOf(c) || ''}" alt=""> ${c.set.toUpperCase()}`, i + 1));
   show(cands.length ? 1 : 0);
 };
 document.querySelectorAll('.quick button').forEach(b => b.onclick = () => { $('q').value = b.dataset.q; $('go').click(); });
+$('file').onchange = e => {
+  const f = e.target.files[0]; e.target.value = '';
+  if (!f) return;
+  if (upUrl) URL.revokeObjectURL(upUrl);
+  upUrl = URL.createObjectURL(f);
+  const i = new Image();
+  i.onload = () => {
+    upImg = i;
+    const t0 = document.querySelector('.t');
+    if (t0) t0.innerHTML = `<img src="${upUrl}" alt="">Your image`;
+    if (!parsed) parsed = parse($('q').value || 'token');
+    show(0);
+  };
+  i.onerror = () => log('Could not read that image.');
+  i.src = upUrl;
+};
 $('rt').addEventListener('change', () => { if (parsed && sel === 0) show(0); });
 $('q').addEventListener('keydown', e => { if (e.key === 'Enter') $('go').click(); });
 
