@@ -1,0 +1,299 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Token Printer</title>
+<style>
+:root{--bg:#fff;--fg:#1a1a1a;--mut:#666;--card:#f2f2f2;--acc:#2f6fed;--bd:#ccc}
+@media (prefers-color-scheme:dark){:root{--bg:#121212;--fg:#eee;--mut:#999;--card:#1e1e1e;--acc:#6b9bff;--bd:#444}}
+*{box-sizing:border-box}
+body{margin:0;padding:14px;font:16px system-ui,sans-serif;background:var(--bg);color:var(--fg);max-width:520px;margin-inline:auto}
+h1{font-size:20px;margin:0 0 12px}
+.row{display:flex;gap:8px;margin-bottom:10px}
+input,button{font:inherit;padding:11px;border-radius:8px;border:1px solid var(--bd);background:var(--card);color:var(--fg)}
+input{flex:1;min-width:0}
+button{cursor:pointer}
+button.p{background:var(--acc);color:#fff;border-color:var(--acc)}
+button:disabled{opacity:.5}
+#st{font-size:13px;color:var(--mut);margin:6px 0;white-space:pre-wrap;max-height:110px;overflow:auto}
+#grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(90px,1fr));gap:8px;margin:10px 0}
+.t{border:2px solid transparent;border-radius:8px;background:var(--card);padding:3px;cursor:pointer;font-size:11px;text-align:center;overflow:hidden}
+.t.sel{border-color:var(--acc)}
+.t img{width:100%;height:60px;object-fit:cover;border-radius:5px;display:block}
+.t .ph{height:60px;display:flex;align-items:center;justify-content:center;font-size:22px}
+#prev{display:block;margin:10px auto;background:#fff;border:1px solid var(--bd);max-width:100%;width:384px}
+label{font-size:14px;color:var(--mut);display:flex;align-items:center;gap:6px}
+#copies{width:64px;flex:none}
+</style>
+</head>
+<body>
+<h1>MTG Token Printer</h1>
+<div class="row">
+  <input id="q" placeholder="3/3 green beast" autocapitalize="none" autocomplete="off">
+  <button class="p" id="go">Find</button>
+</div>
+<div id="st">Type a token, e.g. "1/1 white soldier", "2/2 black zombie", "treasure".</div>
+<div id="grid"></div>
+<canvas id="prev" width="384" height="10"></canvas>
+<div class="row">
+  <button id="conn" style="flex:1">Connect printer</button>
+  <label>Copies <input id="copies" type="number" min="1" max="20" value="1"></label>
+  <button class="p" id="print" disabled>Print</button>
+</div>
+
+<script>
+const W = 384, BPL = 48;
+const COLORS = {white:'w',blue:'u',black:'b',red:'r',green:'g',colorless:'c'};
+const SKIP = new Set(['token','creature','artifact','a','an','the','and','multicolor','gold']);
+const $ = id => document.getElementById(id);
+const st = $('st');
+const log = m => { st.textContent = m; };
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+let parsed = null, cands = [], sel = 0, canvasReady = null, dev = null, chr = null;
+
+/* ---------- parsing ---------- */
+function parse(text) {
+  let t = text.toLowerCase();
+  const m = t.match(/(\d+|\*)\s*\/\s*(\d+|\*)/);
+  let p = null, tt = null;
+  if (m) { p = m[1]; tt = m[2]; t = t.replace(m[0], ' '); }
+  const colors = [], type = [];
+  for (let w of (t.match(/[a-z'-]+/g) || [])) {
+    if (COLORS[w]) { colors.push(COLORS[w]); continue; }
+    if (SKIP.has(w)) continue;
+    if (w === 'elves') w = 'elf'; else if (w === 'wolves') w = 'wolf';
+    else if (w.length > 3 && w.endsWith('s') && !w.endsWith('ss')) w = w.slice(0, -1);
+    type.push(w);
+  }
+  return { p, t: tt, colors, type };
+}
+
+/* ---------- scryfall ---------- */
+async function sf(q) {
+  await sleep(110);
+  const r = await fetch('https://api.scryfall.com/cards/search?unique=art&q=' + encodeURIComponent(q));
+  if (!r.ok) return [];
+  return (await r.json()).data || [];
+}
+function artOf(c) {
+  return (c.image_uris || (c.card_faces && c.card_faces[0].image_uris) || {}).art_crop || null;
+}
+async function search(x) {
+  const ty = x.type.map(w => 't:' + w).join(' ');
+  const pt = (x.p && x.p !== '*' ? ' pow=' + x.p : '') + (x.t && x.t !== '*' ? ' tou=' + x.t : '');
+  const col = x.colors.length ? ' c=' + x.colors.join('') : '';
+  const last = x.type.length ? 't:' + x.type[x.type.length - 1] : '';
+  const steps = [
+    ['Exact match', `is:token ${ty}${pt}${col}`],
+    ['Different color', col ? `is:token ${ty}${pt}` : null],
+    ['Closest (P/T set to yours)', pt ? `is:token ${ty}${col}` : null],
+    ['Closest (P/T set to yours)', pt && col ? `is:token ${ty}` : null],
+    ['Closest by last word', x.type.length > 1 ? `is:token ${last}` : null]
+  ];
+  for (const [label, q] of steps) {
+    if (!q || (!ty && label !== 'Exact match')) continue;
+    if (!ty && !pt && !col) break;
+    const res = await sf(q);
+    if (res.length) return { label, cards: res.slice(0, 15) };
+  }
+  return { label: 'No match', cards: [] };
+}
+
+/* ---------- rendering ---------- */
+function loadImg(url) {
+  return new Promise(res => {
+    if (!url) return res(null);
+    const i = new Image(); i.crossOrigin = 'anonymous';
+    i.onload = () => res(i); i.onerror = () => res(null); i.src = url;
+  });
+}
+function fit(ctx, text, weight, size, maxW) {
+  while (size > 12) { ctx.font = `${weight} ${size}px sans-serif`; if (ctx.measureText(text).width <= maxW) break; size -= 2; }
+  return size;
+}
+function wrap(ctx, text, maxW) {
+  const out = [];
+  for (const para of text.split('\n')) {
+    let line = '';
+    for (const w of para.split(' ')) {
+      const test = line ? line + ' ' + w : w;
+      if (ctx.measureText(test).width > maxW && line) { out.push(line); line = w; } else line = test;
+    }
+    out.push(line);
+  }
+  return out;
+}
+const title = s => s.replace(/\b\w/g, c => c.toUpperCase());
+const COLNAME = {w:'White',u:'Blue',b:'Black',r:'Red',g:'Green',c:'Colorless'};
+
+async function render(card) {
+  const big = document.createElement('canvas'); big.width = W; big.height = 900;
+  const c = big.getContext('2d');
+  c.fillStyle = '#fff'; c.fillRect(0, 0, W, 900);
+  c.fillStyle = '#000'; c.textBaseline = 'alphabetic'; c.textAlign = 'center';
+
+  const typeWords = parsed.type.length ? title(parsed.type.join(' ')) : 'Token';
+  const name = card ? card.name : typeWords;
+  const pw = parsed.p !== null ? parsed.p : (card && card.power);
+  const to = parsed.t !== null ? parsed.t : (card && card.toughness);
+  const hasPT = pw != null && to != null;
+  const typeLine = card ? card.type_line : 'Token Creature \u2014 ' + typeWords;
+  let oracle = card ? (card.oracle_text || (card.card_faces && card.card_faces[0].oracle_text) || '') : '';
+  if (!card && parsed.colors.length) oracle = parsed.colors.map(k => COLNAME[k]).join(' and ') + ' token';
+
+  let y = 12;
+  let fs = fit(c, name, 'bold', card ? 30 : 56, W - 28);
+  c.font = `bold ${fs}px sans-serif`; y += fs;
+  c.fillText(name, W / 2, y - 4); y += 10;
+
+  const img = card ? await loadImg(artOf(card)) : null;
+  if (img) {
+    const h = Math.round((W - 28) * img.height / img.width);
+    c.filter = 'grayscale(1) contrast(1.25)';
+    c.drawImage(img, 14, y, W - 28, h);
+    c.filter = 'none';
+    c.lineWidth = 3; c.strokeRect(14, y, W - 28, h);
+    y += h + 10;
+  }
+  fs = fit(c, typeLine, 'bold', 22, W - 28);
+  c.font = `bold ${fs}px sans-serif`; y += fs;
+  c.fillText(typeLine, W / 2, y - 3); y += 10;
+  c.fillRect(14, y, W - 28, 2); y += 10;
+
+  if (oracle) {
+    c.font = '20px sans-serif'; c.textAlign = 'left';
+    for (const ln of wrap(c, oracle, W - 28)) { y += 24; c.fillText(ln, 14, y - 4); }
+    y += 8;
+  }
+  if (hasPT) {
+    const bw = 104, bh = 50;
+    c.lineWidth = 4; c.strokeRect(W - 14 - bw, y + 4, bw, bh);
+    c.textAlign = 'center'; c.font = 'bold 32px sans-serif';
+    c.fillText(`${pw}/${to}`, W - 14 - bw / 2, y + 4 + 37);
+    y += bh + 10;
+  }
+  y += 8;
+  c.lineWidth = 5; c.strokeRect(3, 3, W - 6, y - 6);
+
+  const out = document.createElement('canvas'); out.width = W; out.height = y + 2;
+  const o = out.getContext('2d'); o.fillStyle = '#fff'; o.fillRect(0, 0, W, y + 2);
+  o.drawImage(big, 0, 0, W, y, 0, 0, W, y);
+  return out;
+}
+
+function toRaster(cv) {
+  const h = cv.height;
+  const d = cv.getContext('2d').getImageData(0, 0, W, h).data;
+  const g = new Float32Array(W * h);
+  for (let i = 0; i < W * h; i++) g[i] = 0.299 * d[i*4] + 0.587 * d[i*4+1] + 0.114 * d[i*4+2];
+  const bytes = new Uint8Array(BPL * h);
+  for (let y = 0; y < h; y++) for (let x = 0; x < W; x++) {
+    const i = y * W + x, old = g[i], nw = old < 128 ? 0 : 255, err = old - nw;
+    if (nw === 0) bytes[y * BPL + (x >> 3)] |= 0x80 >> (x & 7);
+    if (x + 1 < W) g[i+1] += err * 7 / 16;
+    if (y + 1 < h) {
+      if (x > 0) g[i+W-1] += err * 3 / 16;
+      g[i+W] += err * 5 / 16;
+      if (x + 1 < W) g[i+W+1] += err * 1 / 16;
+    }
+  }
+  return { bytes, h };
+}
+
+/* ---------- UI ---------- */
+async function show(i) {
+  sel = i;
+  [...document.querySelectorAll('.t')].forEach((e, k) => e.classList.toggle('sel', k === i));
+  const cv = await render(i === 0 ? null : cands[i - 1]);
+  canvasReady = cv;
+  const p = $('prev'); p.width = cv.width; p.height = cv.height;
+  p.getContext('2d').drawImage(cv, 0, 0);
+  $('print').disabled = !chr;
+}
+
+$('go').onclick = async () => {
+  const text = $('q').value.trim(); if (!text) return;
+  parsed = parse(text);
+  const d = `${parsed.p ?? '?'}/${parsed.t ?? '?'} ${parsed.colors.map(k => COLNAME[k]).join('/') || 'any color'} ${parsed.type.join(' ') || '(no type)'}`;
+  log('Searching Scryfall for ' + d + '\u2026');
+  $('go').disabled = true;
+  try {
+    const r = await search(parsed);
+    cands = r.cards;
+    log(`${r.label}: ${cands.length} art option${cands.length === 1 ? '' : 's'} (${d}). Tap one to preview.`);
+  } catch (e) { cands = []; log('Scryfall error: ' + e.message + '. Using placeholder.'); }
+  $('go').disabled = false;
+  const g = $('grid'); g.innerHTML = '';
+  const mk = (inner, i) => { const e = document.createElement('div'); e.className = 't'; e.innerHTML = inner; e.onclick = () => show(i); g.appendChild(e); };
+  mk('<div class="ph">\u270E</div>Placeholder', 0);
+  cands.forEach((c, i) => mk(`<img src="${artOf(c) || ''}" alt=""> ${c.set.toUpperCase()}`, i + 1));
+  show(cands.length ? 1 : 0);
+};
+$('q').addEventListener('keydown', e => { if (e.key === 'Enter') $('go').click(); });
+
+/* ---------- bluetooth ---------- */
+$('conn').onclick = async () => {
+  if (!navigator.bluetooth) { log('Web Bluetooth is not available. In Brave, enable brave://flags/#brave-web-bluetooth-api and relaunch.'); return; }
+  try {
+    dev = await navigator.bluetooth.requestDevice({
+      acceptAllDevices: true,
+      optionalServices: [0xff00, 0xae30, 0x18f0, 'e7810a71-73ae-499d-8c15-faa9aef0c3f2']
+    });
+    dev.addEventListener('gattserverdisconnected', () => { chr = null; $('print').disabled = true; $('conn').textContent = 'Connect printer'; });
+    await findChar();
+    $('conn').textContent = 'Connected: ' + (dev.name || 'printer');
+    $('print').disabled = !canvasReady;
+  } catch (e) { log('Connect failed: ' + e.message); }
+};
+async function findChar() {
+  const server = await dev.gatt.connect();
+  const svcs = await server.getPrimaryServices();
+  let found = [];
+  for (const s of svcs) for (const c of await s.getCharacteristics()) {
+    if (c.properties.writeWithoutResponse || c.properties.write) found.push(c);
+  }
+  chr = found.find(c => c.uuid.startsWith('0000ff02')) || found[0] || null;
+  if (!chr) throw new Error('no writable characteristic found; services: ' + svcs.map(s => s.uuid).join(', '));
+  log('Connected. Using characteristic ' + chr.uuid);
+}
+let chunk = 120;
+async function send(bytes) {
+  for (let i = 0; i < bytes.length;) {
+    const part = bytes.slice(i, i + chunk);
+    try {
+      if (chr.writeValueWithoutResponse) await chr.writeValueWithoutResponse(part); else await chr.writeValue(part);
+      i += chunk; await sleep(12);
+    } catch (e) {
+      if (chunk > 20) { chunk = Math.max(20, chunk >> 1); await sleep(100); } else throw e;
+    }
+  }
+}
+const cat = (...a) => { const n = a.reduce((s, x) => s + x.length, 0), o = new Uint8Array(n); let p = 0; for (const x of a) { o.set(x, p); p += x.length; } return o; };
+const HEAD = Uint8Array.from([0x1b,0x40, 0x1b,0x61,0x01, 0x1f,0x11,0x02,0x04]);
+const FOOT = Uint8Array.from([0x1b,0x64,0x02, 0x1b,0x64,0x02, 0x1f,0x11,0x08, 0x1f,0x11,0x0e, 0x1f,0x11,0x07, 0x1f,0x11,0x09]);
+
+$('print').onclick = async () => {
+  if (!canvasReady || !chr) return;
+  const n = Math.min(20, Math.max(1, +$('copies').value || 1));
+  $('print').disabled = true;
+  try {
+    const { bytes, h } = toRaster(canvasReady);
+    for (let k = 1; k <= n; k++) {
+      log(`Printing ${k}/${n}\u2026`);
+      await send(HEAD);
+      for (let y = 0; y < h; y += 255) {
+        const rows = Math.min(255, h - y);
+        await send(cat(Uint8Array.from([0x1d,0x76,0x30,0x00, BPL & 255, BPL >> 8, rows & 255, rows >> 8]), bytes.slice(y * BPL, (y + rows) * BPL)));
+      }
+      await send(FOOT);
+      await sleep(1500);
+    }
+    log('Done.');
+  } catch (e) { log('Print failed: ' + e.message); }
+  $('print').disabled = false;
+};
+</script>
+</body>
+</html>
