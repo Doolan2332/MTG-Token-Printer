@@ -181,9 +181,10 @@ async function render(card) {
     : (!hasPT && ARTIFACTS.has(lastW)) ? 'Token Artifact \u2014 ' + typeWords
     : 'Token Creature \u2014 ' + typeWords;
   let oracle = card ? (card.oracle_text || (card.card_faces && card.card_faces[0].oracle_text) || '') : '';
+  let italic = false;
   if (!card) {
     const custom = $('rt').value.trim();
-    if (custom) oracle = custom;
+    if (custom) { oracle = custom; italic = /^["\u201c][\s\S]*["\u201d]$/.test(custom); }
     else if (!parsed.emblem && ART_TEXT[lastW] && !hasPT) oracle = ART_TEXT[lastW];
     else if (parsed.colors.length) oracle = parsed.colors.map(k => COLNAME[k]).join(' and ') + ' token';
   }
@@ -209,7 +210,7 @@ async function render(card) {
   c.fillRect(14, y, W - 28, 2); y += 10;
 
   if (oracle) {
-    c.font = '20px sans-serif'; c.textAlign = 'left';
+    c.font = card ? '20px sans-serif' : (italic ? 'italic ' : '') + '20px Beleren, sans-serif'; c.textAlign = 'left';
     for (const ln of wrap(c, oracle, W - 28)) { y += 24; c.fillText(ln, 14, y - 4); }
     y += 8;
   }
